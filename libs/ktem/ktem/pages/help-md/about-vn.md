@@ -1,4 +1,4 @@
-# Về Kotaemon
+# Về Trợ lý ảo nội bộ
 
 Một công cụ mã nguồn mở để trò chuyện với tài liệu của bạn. 
 Được xây dựng dành cho cả người dùng cuối và nhà phát triển.
