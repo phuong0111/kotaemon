@@ -21,7 +21,7 @@ function run() {
 
   // setup conversation dropdown placeholder
   let conv_dropdown = document.querySelector("#conversation-dropdown input");
-  conv_dropdown.placeholder = "Nhập tên cuộc hội thoại";
+  conv_dropdown.placeholder = "Nh\u1EADp t\u00EAn cu\u1ED9c h\u1ED9i tho\u1EA1i";
 
   // move info-expand-button
   let info_expand_button = document.getElementById("info-expand-button");
