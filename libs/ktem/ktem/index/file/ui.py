@@ -283,6 +283,22 @@ class FileIndexPage(BasePage):
                 variant="primary",
             )
 
+    def load_group_choices(self, user_id):
+        """Load available groups for dropdown selection"""
+        if user_id is None:
+            return gr.update(choices=[])
+
+        FileGroup = self._index._resources["FileGroup"]
+        with Session(engine) as session:
+            statement = select(FileGroup)
+            if self._index.config.get("private", False):
+                statement = statement.where(FileGroup.user == user_id)
+            
+            results = session.execute(statement).all()
+            choices = [(group[0].name, group[0].id) for group in results]
+            
+        return gr.update(choices=choices)
+
     def on_building_ui(self):
         """Build the UI of the app"""
         with gr.Row():
@@ -312,6 +328,30 @@ class FileIndexPage(BasePage):
                             self.reindex = gr.Checkbox(
                                 value=False, label="Buộc lập chỉ mục lại tệp", container=False
                             )
+                        
+                        # Enhanced: Simplified group assignment options (no checkbox)
+                        gr.Markdown("### Tổ chức tệp")
+                        gr.Markdown("*Tùy chọn: Gán tệp vào nhóm sau khi tải lên*")
+                        
+                        with gr.Row():
+                            self.existing_group_dropdown = gr.Dropdown(
+                                label="Chọn nhóm hiện có",
+                                choices=[],
+                                value=None,
+                                allow_custom_value=False,
+                                container=True
+                            )
+                        
+                        with gr.Row():
+                            self.new_group_name = gr.Textbox(
+                                label="Tạo nhóm mới",
+                                placeholder="Nhập tên nhóm mới...",
+                                lines=1,
+                                max_lines=1,
+                                container=True
+                            )
+                        
+                        gr.Markdown("*Lưu ý: Nếu nhập tên nhóm mới, hệ thống sẽ tạo nhóm mới và bỏ qua lựa chọn nhóm hiện có. Để chỉ tải tệp mà không gán nhóm, bỏ trống cả hai trường.*")
 
                     self.upload_button = gr.Button(
                         "Tải lên và Chỉ mục", variant="primary"
@@ -383,6 +423,16 @@ class FileIndexPage(BasePage):
                     "fn": self.list_file_names,
                     "inputs": [self.file_list_state],
                     "outputs": [self.group_files],
+                    "show_progress": "hidden",
+                },
+            )
+            # Enhanced: Load group choices on sign in
+            self._app.subscribe_event(
+                name="onSignIn",
+                definition={
+                    "fn": self.load_group_choices,
+                    "inputs": [self._app.user_id],
+                    "outputs": [self.existing_group_dropdown],
                     "show_progress": "hidden",
                 },
             )
@@ -472,6 +522,10 @@ class FileIndexPage(BasePage):
                 elif each[0].relation_type == "document":
                     ds_ids.append(each[0].target_id)
                 session.delete(each[0])
+            
+            # Enhanced: Remove file from all groups that contain it
+            self.remove_file_from_all_groups(file_id, session)
+            
             session.commit()
 
         if vs_ids:
@@ -481,6 +535,40 @@ class FileIndexPage(BasePage):
         gr.Info(f"Tệp {file_name} đã được xóa")
 
         return None, self.selected_panel_false
+
+    def remove_file_from_all_groups(self, file_id, session=None):
+        """Remove a file from all groups that contain it"""
+        should_close_session = False
+        if session is None:
+            session = Session(engine)
+            should_close_session = True
+            
+        try:
+            FileGroup = self._index._resources["FileGroup"]
+            
+            # Get all groups
+            all_groups = session.execute(select(FileGroup)).all()
+            
+            groups_updated = []
+            for group_row in all_groups:
+                group = group_row[0]
+                files_in_group = group.data.get("files", [])
+                
+                # Check if this file is in the group
+                if file_id in files_in_group:
+                    # Remove the file from the group
+                    updated_files = [fid for fid in files_in_group if fid != file_id]
+                    group.data = {"files": updated_files}
+                    groups_updated.append(group.name)
+            
+            if groups_updated:
+                print(f"Removed file {file_id} from groups: {', '.join(groups_updated)}")
+                
+        except Exception as e:
+            print(f"Error removing file from groups: {e}")
+        finally:
+            if should_close_session:
+                session.close()
 
     def delete_no_event(self):
         return (
@@ -571,8 +659,51 @@ class FileIndexPage(BasePage):
         return gr.DownloadButton(label=DOWNLOAD_MESSAGE, value=f"{zip_file_path}.zip")
 
     def delete_all_files(self, file_list):
+        """Delete all files and remove them from groups"""
+        deleted_files = []
         for file_id in file_list.id.values:
-            self.delete_event(file_id)
+            if file_id != "-":  # Skip empty placeholder rows
+                deleted_files.append(file_id)
+                self.delete_event(file_id)
+        
+        # Additional group cleanup for bulk operations
+        if deleted_files:
+            self.cleanup_empty_groups()
+            gr.Info(f"Đã xóa {len(deleted_files)} tệp và cập nhật các nhóm liên quan")
+
+    def cleanup_empty_groups(self):
+        """Remove empty groups or groups with no valid files"""
+        with Session(engine) as session:
+            FileGroup = self._index._resources["FileGroup"]
+            Source = self._index._resources["Source"]
+            
+            all_groups = session.execute(select(FileGroup)).all()
+            
+            for group_row in all_groups:
+                group = group_row[0]
+                files_in_group = group.data.get("files", [])
+                
+                if not files_in_group:
+                    # Group is empty, optionally delete it
+                    # For now, just log it - you can uncomment the delete if you want
+                    print(f"Found empty group: {group.name}")
+                    # session.delete(group)
+                else:
+                    # Check if any files in the group still exist
+                    valid_files = []
+                    for file_id in files_in_group:
+                        file_exists = session.execute(
+                            select(Source.id).where(Source.id == file_id)
+                        ).first()
+                        if file_exists:
+                            valid_files.append(file_id)
+                    
+                    # Update group if some files were invalid
+                    if len(valid_files) != len(files_in_group):
+                        group.data = {"files": valid_files}
+                        print(f"Updated group '{group.name}': removed {len(files_in_group) - len(valid_files)} invalid files")
+            
+            session.commit()
 
     def set_file_id_selector(self, selected_file_id):
         return [selected_file_id, "select", gr.Tabs(selected="chat-tab")]
@@ -594,6 +725,62 @@ class FileIndexPage(BasePage):
                 gr.update(visible=True),
                 gr.update(visible=True),
             ]
+
+    def clear_group_selection_on_new_name(self, new_group_name):
+        """Clear existing group selection when user types new group name"""
+        if new_group_name and new_group_name.strip():
+            return gr.update(value=None)
+        return gr.update()
+
+    def handle_group_assignment_after_upload(self, file_ids, assign_to_group, existing_group_id, new_group_name, user_id):
+        """Handle group assignment after successful file upload"""
+        if not assign_to_group or not file_ids:
+            return
+
+        try:
+            if new_group_name and new_group_name.strip():
+                # Create new group with uploaded files
+                group_id = self.save_group(None, new_group_name.strip(), file_ids, user_id)
+                gr.Info(f"Đã tạo nhóm mới '{new_group_name.strip()}' và thêm {len(file_ids)} tệp")
+                return group_id
+            elif existing_group_id:
+                # Add to existing group
+                existing_files = self.get_group_files(existing_group_id)
+                combined_files = list(set(existing_files + file_ids))  # Remove duplicates
+                
+                # Get group name for display
+                FileGroup = self._index._resources["FileGroup"]
+                with Session(engine) as session:
+                    group = session.execute(
+                        select(FileGroup).where(FileGroup.id == existing_group_id)
+                    ).first()
+                    group_name = group[0].name if group else "Unknown"
+                
+                # Update the existing group with combined files
+                updated_group_id = self.save_group(existing_group_id, group_name, combined_files, user_id)
+                gr.Info(f"Đã thêm {len(file_ids)} tệp vào nhóm '{group_name}'")
+                return updated_group_id
+            else:
+                gr.Warning("Không có nhóm nào được chọn để thêm tệp")
+                
+        except Exception as e:
+            gr.Warning(f"Lỗi khi thêm vào nhóm: {str(e)}")
+            print(f"Group assignment error: {e}")
+            return None
+
+    def get_group_files(self, group_id):
+        """Get list of file IDs in a group"""
+        if not group_id:
+            return []
+            
+        FileGroup = self._index._resources["FileGroup"]
+        with Session(engine) as session:
+            group = session.execute(
+                select(FileGroup).where(FileGroup.id == group_id)
+            ).first()
+            if group:
+                return group[0].data.get("files", [])
+        return []
 
     def on_register_quick_uploads(self):
         try:
@@ -734,6 +921,14 @@ class FileIndexPage(BasePage):
         if KH_DEMO_MODE:
             return
 
+        # Enhanced: Clear existing group selection when typing new group name
+        self.new_group_name.change(
+            fn=self.clear_group_selection_on_new_name,
+            inputs=[self.new_group_name],
+            outputs=[self.existing_group_dropdown],
+            show_progress="hidden",
+        )
+
         onDeleted = (
             self.delete_button.click(
                 fn=self.delete_event,
@@ -750,6 +945,11 @@ class FileIndexPage(BasePage):
                 fn=self.list_file,
                 inputs=[self._app.user_id, self.filter],
                 outputs=[self.file_list_state, self.file_list],
+            )
+            .then(
+                fn=self.list_group,  # Enhanced: Refresh group list after file deletion
+                inputs=[self._app.user_id, self.file_list_state],
+                outputs=[self.group_list_state, self.group_list],
             )
             .then(
                 fn=self.file_selected,
@@ -836,6 +1036,10 @@ class FileIndexPage(BasePage):
             inputs=[self._app.user_id, self.filter],
             outputs=[self.file_list_state, self.file_list],
         ).then(
+            fn=self.list_group,  # Enhanced: Refresh group list after bulk deletion
+            inputs=[self._app.user_id, self.file_list_state],
+            outputs=[self.group_list_state, self.group_list],
+        ).then(
             lambda: [
                 gr.update(visible=True),
                 gr.update(visible=False),
@@ -864,17 +1068,20 @@ class FileIndexPage(BasePage):
                 show_progress="hidden",
             )
 
+        # Enhanced: Modified upload event to handle group assignment
         onUploaded = (
             self.upload_button.click(
                 fn=lambda: gr.update(visible=True),
                 outputs=[self.upload_progress_panel],
             )
             .then(
-                fn=self.index_fn,
+                fn=self.index_fn_with_group_assignment,
                 inputs=[
                     self.files,
                     self.urls,
                     self.reindex,
+                    self.existing_group_dropdown,
+                    self.new_group_name,
                     self._app.settings_state,
                     self._app.user_id,
                 ],
@@ -892,13 +1099,24 @@ class FileIndexPage(BasePage):
             inputs=[self._app.user_id, self.filter],
             outputs=[self.file_list_state, self.file_list],
             concurrency_limit=20,
+        ).then(
+            fn=self.list_group,
+            inputs=[self._app.user_id, self.file_list_state],
+            outputs=[self.group_list_state, self.group_list],
+            concurrency_limit=20,
+        ).then(
+            fn=self.load_group_choices,
+            inputs=[self._app.user_id],
+            outputs=[self.existing_group_dropdown],
+            show_progress="hidden",
         )
+        
         for event in self._app.get_event(f"onFileIndex{self._index.id}Changed"):
             uploadedEvent = uploadedEvent.then(**event)
 
         _ = onUploaded.success(
-            fn=lambda: None,
-            outputs=[self.files],
+            fn=lambda: (None, None, ""),  # Reset form after successful upload
+            outputs=[self.files, self.existing_group_dropdown, self.new_group_name],
         )
 
         self.btn_close_upload_progress_panel.click(
@@ -1021,6 +1239,12 @@ class FileIndexPage(BasePage):
                 inputs=[self._app.user_id, self.file_list_state],
                 outputs=[self.group_list_state, self.group_list],
             )
+            .then(
+                fn=self.load_group_choices,
+                inputs=[self._app.user_id],
+                outputs=[self.existing_group_dropdown],
+                show_progress="hidden",
+            )
             .then(**onGroupClosedEvent)
         )
         onGroupDeleted = (
@@ -1032,6 +1256,12 @@ class FileIndexPage(BasePage):
                 self.list_group,
                 inputs=[self._app.user_id, self.file_list_state],
                 outputs=[self.group_list_state, self.group_list],
+            )
+            .then(
+                fn=self.load_group_choices,
+                inputs=[self._app.user_id],
+                outputs=[self.existing_group_dropdown],
+                show_progress="hidden",
             )
             .then(**onGroupClosedEvent)
         )
@@ -1057,6 +1287,11 @@ class FileIndexPage(BasePage):
             self.list_file_names,
             inputs=[self.file_list_state],
             outputs=[self.group_files],
+        ).then(
+            self.load_group_choices,
+            inputs=[self._app.user_id],
+            outputs=[self.existing_group_dropdown],
+            show_progress="hidden",
         )
 
     def _may_extract_zip(self, files, zip_dir: str):
@@ -1163,6 +1398,67 @@ class FileIndexPage(BasePage):
             gr.Warning(f"Có lỗi cho {n_errors} tệp")
 
         return results
+
+    def index_fn_with_group_assignment(
+        self, files, urls, reindex: bool, existing_group_id, new_group_name: str, settings, user_id
+    ) -> Generator[tuple[str, str], None, None]:
+        """Enhanced upload function that handles group assignment
+
+        Args:
+            files: the list of files to be uploaded
+            urls: list of web URLs to be indexed
+            reindex: whether to reindex the files
+            existing_group_id: ID of existing group to add to
+            new_group_name: name of new group to create
+            settings: the settings of the app
+            user_id: current user ID
+        """
+        # Determine if group assignment is needed
+        assign_to_group = bool((new_group_name and new_group_name.strip()) or existing_group_id)
+        
+        # First, perform the normal indexing and collect file IDs
+        file_ids = []
+        
+        # Use the existing index_fn generator and collect results
+        indexing_generator = self.index_fn(files, urls, reindex, settings, user_id)
+        
+        try:
+            # Stream the indexing process
+            while True:
+                output_result, debug_result = next(indexing_generator)
+                yield output_result, debug_result
+        except StopIteration as e:
+            # Get the file IDs from the completed indexing
+            if hasattr(e, 'value') and e.value:
+                file_ids = [result for result in e.value if result]
+            else:
+                # Fallback: try to get recently uploaded files
+                file_ids = self.get_recent_uploaded_files(user_id)
+        except Exception as e:
+            print(f"Error during indexing: {e}")
+            yield f"Lỗi: {e}", ""
+            return
+
+        # Handle group assignment if needed
+        if assign_to_group and file_ids:
+            try:
+                self.handle_group_assignment_after_upload(
+                    file_ids, assign_to_group, existing_group_id, new_group_name, user_id
+                )
+            except Exception as e:
+                print(f"Error in group assignment: {e}")
+                gr.Warning(f"Tệp đã được tải lên nhưng có lỗi khi thêm vào nhóm: {str(e)}")
+
+    def get_recent_uploaded_files(self, user_id, limit=10):
+        """Get recently uploaded files as fallback when file IDs are not available"""
+        Source = self._index._resources["Source"]
+        with Session(engine) as session:
+            statement = select(Source.id).order_by(Source.date_created.desc()).limit(limit)
+            if self._index.config.get("private", False):
+                statement = statement.where(Source.user == user_id)
+            
+            results = session.execute(statement).all()
+            return [result[0] for result in results]
 
     def index_fn_file_with_default_loaders(
         self, files, reindex: bool, settings, user_id
@@ -1499,16 +1795,30 @@ class FileIndexPage(BasePage):
         FileGroup = self._index._resources["FileGroup"]
         current_group = None
 
+        # Ensure group_files is a list of file IDs
+        if isinstance(group_files, str):
+            try:
+                group_files = json.loads(group_files)
+            except json.JSONDecodeError:
+                group_files = [group_files]  # Single file ID as string
+        elif not isinstance(group_files, list):
+            group_files = list(group_files) if group_files else []
+
         # check if group_name exist
         with Session(engine) as session:
             if group_id:
                 current_group = session.query(FileGroup).filter_by(id=group_id).first()
-                # update current group with new info
-                current_group.name = group_name
-                current_group.data["files"] = group_files  # Update the files
-                session.commit()
+                if current_group:
+                    # update current group with new info
+                    if group_name:  # Only update name if provided
+                        current_group.name = group_name
+                    current_group.data = {"files": group_files}  # Update the files
+                    session.commit()
+                else:
+                    raise gr.Error(f"Không tìm thấy nhóm với ID {group_id}")
             else:
-                current_group = (
+                # Check if group name already exists for this user
+                existing_group = (
                     session.query(FileGroup)
                     .filter_by(
                         name=group_name,
@@ -1516,7 +1826,7 @@ class FileIndexPage(BasePage):
                     )
                     .first()
                 )
-                if current_group:
+                if existing_group:
                     raise gr.Error(f"Nhóm {group_name} đã tồn tại")
 
                 current_group = FileGroup(
@@ -1529,7 +1839,7 @@ class FileIndexPage(BasePage):
 
             group_id = current_group.id
 
-        gr.Info(f"Nhóm {group_name} đã được lưu")
+        gr.Info(f"Nhóm {group_name or 'Unknown'} đã được lưu với {len(group_files)} tệp")
         return group_id
 
     def delete_group(self, group_id):
