@@ -10,10 +10,10 @@ from .simple_file import SimpleFileVectorStore
 __all__ = [
     "BaseVectorStore",
     "ChromaVectorStore",
+    "ElasticsearchVectorStore",
     "InMemoryVectorStore",
     "SimpleFileVectorStore",
     "LanceDBVectorStore",
     "MilvusVectorStore",
     "QdrantVectorStore",
-    "ElasticsearchVectorStore",
 ]

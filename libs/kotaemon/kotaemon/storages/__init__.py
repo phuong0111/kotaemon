@@ -8,6 +8,7 @@ from .docstores import (
 from .vectorstores import (
     BaseVectorStore,
     ChromaVectorStore,
+    ElasticsearchVectorStore,
     InMemoryVectorStore,
     LanceDBVectorStore,
     MilvusVectorStore,
@@ -25,6 +26,7 @@ __all__ = [
     # Vector stores
     "BaseVectorStore",
     "ChromaVectorStore",
+    "ElasticsearchVectorStore",
     "InMemoryVectorStore",
     "SimpleFileVectorStore",
     "LanceDBVectorStore",
