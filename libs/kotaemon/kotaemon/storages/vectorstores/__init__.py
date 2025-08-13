@@ -1,5 +1,6 @@
 from .base import BaseVectorStore
 from .chroma import ChromaVectorStore
+from .elasticsearch import ElasticsearchVectorStore
 from .in_memory import InMemoryVectorStore
 from .lancedb import LanceDBVectorStore
 from .milvus import MilvusVectorStore
@@ -14,4 +15,5 @@ __all__ = [
     "LanceDBVectorStore",
     "MilvusVectorStore",
     "QdrantVectorStore",
+    "ElasticsearchVectorStore",
 ]
